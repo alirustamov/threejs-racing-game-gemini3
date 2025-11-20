@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Racer 3D - Redux</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0b0b1a;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none; /* Critical for mobile games */
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        #score-display {
+            color: #0ff;
+            text-shadow: 0 0 10px #0ff;
+            font-size: 2.5rem;
+            font-weight: 800;
+            text-align: center;
+            margin-top: 40px; /* Lowered to avoid notches */
+            letter-spacing: 2px;
+        }
+
+        #start-screen, #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            pointer-events: auto;
+            backdrop-filter: blur(4px);
+            z-index: 20; /* Ensure above everything */
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        h1 {
+            color: #f0f;
+            text-shadow: 0 0 20px #f0f, 2px 2px 0px #0ff;
+            font-size: 3.5rem;
+            margin: 0 0 10px 0;
+            font-style: italic;
+            text-transform: uppercase;
+            text-align: center;
+            line-height: 1;
+        }
+
+        p {
+            color: #fff;
+            font-size: 1.2rem;
+            margin-bottom: 40px;
+            text-align: center;
+            opacity: 0.8;
+        }
+
+        button {
+            background: linear-gradient(90deg, #f0f, #0ff);
+            border: none;
+            padding: 20px 60px;
+            color: #fff;
+            font-size: 1.8rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 0 30px rgba(255, 0, 255, 0.6);
+            animation: pulse 1.5s infinite;
+            outline: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        button:active {
+            transform: scale(0.95);
+            box-shadow: 0 0 10px rgba(255, 0, 255, 0.8);
+        }
+
+        /* Instructions Overlay at bottom */
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255,255,255,0.5);
+            font-size: 0.9rem;
+            pointer-events: none;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 20px rgba(255, 0, 255, 0.5); }
+            50% { transform: scale(1.05); box-shadow: 0 0 40px rgba(255, 0, 255, 0.8); }
+            100% { transform: scale(1); box-shadow: 0 0 20px rgba(255, 0, 255, 0.5); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div id="score-display">0</div>
+        <div id="controls-hint">TAP LEFT / RIGHT</div>
+    </div>
+
+    <div id="start-screen">
+        <h1>NEON<br>RACER</h1>
+        <p>Hold Left or Right side of screen<br>to dodge obstacles</p>
+        <button id="start-btn">START</button>
+    </div>
+
+    <div id="game-over-screen" class="hidden">
+        <h1>CRASH!</h1>
+        <p>Final Score: <span id="final-score">0</span></p>
+        <button id="restart-btn">RETRY</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- CONFIG ---
+        const CONFIG = {
+            laneWidth: 10,
+            baseSpeed: 0.4,
+            maxSpeed: 1.2,
+            acceleration: 0.0002,
+            steerSpeed: 0.25,
+            colors: {
+                sky: 0x0b0b1a,
+                road: 0x222233,
+                roadLine: 0x00ffff,
+                car: 0xff00ff,
+                obstacle: 0xff3333
+            }
+        };
+
+        // --- STATE ---
+        let state = {
+            isPlaying: false,
+            score: 0,
+            speed: CONFIG.baseSpeed,
+            steerDirection: 0, // -1, 0, 1
+        };
+
+        // --- GLOBALS ---
+        let scene, camera, renderer;
+        let player, roadGroup;
+        let obstacles = [];
+        let roadLines = [];
+        let particles = [];
+        let clock = new THREE.Clock();
+
+        // --- ELEMENTS ---
+        const scoreEl = document.getElementById('score-display');
+        const finalScoreEl = document.getElementById('final-score');
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+
+        function init() {
+            // 1. Renderer
+            const container = document.getElementById('canvas-container');
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true; // Enable basic shadows
+            container.appendChild(renderer.domElement);
+
+            // 2. Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(CONFIG.colors.sky);
+            scene.fog = new THREE.FogExp2(CONFIG.colors.sky, 0.02);
+
+            // 3. Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 3, 6); // Elevated view
+            camera.lookAt(0, 0, -4);
+
+            // 4. Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(5, 10, 5);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // 5. Objects
+            createRoad();
+            createPlayer();
+            createStarfield();
+
+            // 6. Events
+            window.addEventListener('resize', onWindowResize, false);
+            setupControls();
+
+            // 7. Start Loop
+            requestAnimationFrame(animate);
+        }
+
+        function createRoad() {
+            roadGroup = new THREE.Group();
+            scene.add(roadGroup);
+
+            // Main Road Surface
+            const geo = new THREE.PlaneGeometry(CONFIG.laneWidth, 200);
+            const mat = new THREE.MeshPhongMaterial({ 
+                color: CONFIG.colors.road,
+                shininess: 10
+            });
+            const road = new THREE.Mesh(geo, mat);
+            road.rotation.x = -Math.PI / 2;
+            road.position.z = -50; // Center it so it stretches forward
+            road.receiveShadow = true;
+            roadGroup.add(road);
+
+            // Moving Side Lines (Grid effect)
+            const gridHelper = new THREE.GridHelper(200, 50, CONFIG.colors.roadLine, 0x333344);
+            gridHelper.position.y = 0.01;
+            gridHelper.position.z = -50;
+            roadGroup.add(gridHelper);
+            
+            // Store grid to animate it specifically if needed, 
+            // but we will just move objects past the camera or move texture coords.
+            // Simpler approach: We move the "world" towards camera for obstacles, 
+            // and for the ground we can just animate texture offset or use stripes.
+            
+            // Let's make simple stripes for speed sensation
+            for(let i=0; i<20; i++) {
+                const stripGeo = new THREE.PlaneGeometry(0.2, 4);
+                const stripMat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.roadLine });
+                const strip = new THREE.Mesh(stripGeo, stripMat);
+                strip.rotation.x = -Math.PI / 2;
+                strip.position.set(0, 0.02, -i * 10);
+                roadLines.push(strip);
+                scene.add(strip);
+            }
+        }
+
+        function createPlayer() {
+            player = new THREE.Group();
+            
+            // Car Chassis
+            const geo = new THREE.BoxGeometry(1, 0.5, 1.8);
+            const mat = new THREE.MeshPhongMaterial({ 
+                color: CONFIG.colors.car, 
+                emissive: 0x550055,
+                shininess: 30 
+            });
+            const chassis = new THREE.Mesh(geo, mat);
+            chassis.castShadow = true;
+            chassis.position.y = 0.25;
+            player.add(chassis);
+
+            // Neon Underglow
+            const glowGeo = new THREE.PlaneGeometry(1.2, 2);
+            const glowMat = new THREE.MeshBasicMaterial({ 
+                color: 0xff00ff, 
+                transparent: true, 
+                opacity: 0.5 
+            });
+            const glow = new THREE.Mesh(glowGeo, glowMat);
+            glow.rotation.x = -Math.PI/2;
+            glow.position.y = 0.05;
+            player.add(glow);
+
+            scene.add(player);
+        }
+
+        function createStarfield() {
+            // Particles to give speed effect
+            const geo = new THREE.BufferGeometry();
+            const count = 500;
+            const posArray = new Float32Array(count * 3);
+            
+            for(let i=0; i<count * 3; i+=3) {
+                posArray[i] = (Math.random() - 0.5) * 50; // x
+                posArray[i+1] = (Math.random() * 20);     // y
+                posArray[i+2] = -Math.random() * 100;     // z
+            }
+            
+            geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.1 });
+            const stars = new THREE.Points(geo, mat);
+            scene.add(stars);
+            particles.push(stars);
+        }
+
+        function createObstacle() {
+            const xPos = (Math.random() * (CONFIG.laneWidth - 2)) - (CONFIG.laneWidth / 2 - 1);
+            const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const mat = new THREE.MeshPhongMaterial({ 
+                color: CONFIG.colors.obstacle, 
+                emissive: 0x440000 
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(xPos, 0.75, -80); // Spawn far away
+            mesh.castShadow = true;
+            scene.add(mesh);
+            obstacles.push(mesh);
+        }
+
+        function setupControls() {
+            const handleStart = (x) => {
+                const half = window.innerWidth / 2;
+                if (x < half) state.steerDirection = -1;
+                else state.steerDirection = 1;
+            };
+
+            const handleEnd = () => {
+                state.steerDirection = 0;
+            };
+
+            // Touch
+            document.addEventListener('touchstart', (e) => {
+                // Don't prevent default on UI buttons
+                if(e.target.tagName === 'BUTTON') return;
+                e.preventDefault();
+                handleStart(e.touches[0].clientX);
+            }, { passive: false });
+
+            document.addEventListener('touchmove', (e) => {
+                if(e.target.tagName === 'BUTTON') return;
+                e.preventDefault();
+                handleStart(e.touches[0].clientX);
+            }, { passive: false });
+
+            document.addEventListener('touchend', handleEnd);
+
+            // Mouse/Desktop
+            document.addEventListener('mousedown', (e) => {
+                if(e.target.tagName === 'BUTTON') return;
+                handleStart(e.clientX);
+            });
+            document.addEventListener('mouseup', handleEnd);
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowLeft') state.steerDirection = -1;
+                if (e.key === 'ArrowRight') state.steerDirection = 1;
+            });
+            document.addEventListener('keyup', () => state.steerDirection = 0);
+
+            // Buttons
+            document.getElementById('start-btn').addEventListener('click', resetGame);
+            document.getElementById('restart-btn').addEventListener('click', resetGame);
+        }
+
+        function resetGame() {
+            state.score = 0;
+            state.speed = CONFIG.baseSpeed;
+            state.isPlaying = true;
+            state.steerDirection = 0;
+            
+            scoreEl.innerText = "0";
+            startScreen.classList.add('hidden');
+            gameOverScreen.classList.add('hidden');
+
+            // Remove old obstacles
+            obstacles.forEach(ob => scene.remove(ob));
+            obstacles = [];
+            
+            // Reset Player
+            player.position.set(0, 0, 0);
+            player.rotation.set(0, 0, 0);
+        }
+
+        function gameOver() {
+            state.isPlaying = false;
+            finalScoreEl.innerText = Math.floor(state.score);
+            gameOverScreen.classList.remove('hidden');
+        }
+
+        function update(dt) {
+            if (!state.isPlaying) return;
+
+            // 1. Speed & Score
+            state.speed += CONFIG.acceleration;
+            state.speed = Math.min(state.speed, CONFIG.maxSpeed);
+            state.score += state.speed;
+            scoreEl.innerText = Math.floor(state.score);
+
+            // 2. Steer
+            const steerAmt = state.steerDirection * CONFIG.steerSpeed * (60 * dt);
+            player.position.x += steerAmt;
+            
+            // Clamp to road
+            const limit = CONFIG.laneWidth / 2 - 0.6;
+            if (player.position.x > limit) player.position.x = limit;
+            if (player.position.x < -limit) player.position.x = -limit;
+
+            // Tilt Effect
+            player.rotation.z = -state.steerDirection * 0.15;
+
+            // 3. Move Environment (Road lines)
+            roadLines.forEach(line => {
+                line.position.z += state.speed * 40 * dt; // Visual speed multiplier
+                if (line.position.z > 5) {
+                    line.position.z = -95;
+                }
+            });
+
+            // 4. Particles (Starfield)
+            particles.forEach(p => {
+                // p is the Points object
+                // We actually want to move the whole system or animate vertices?
+                // Simpler: just move the points object and loop it?
+                // Actually, let's just ignore complex particle logic for performance
+                // and just move obstacles.
+            });
+
+            // 5. Obstacles
+            // Spawn
+            if (Math.random() < 0.02 + (state.speed * 0.02)) {
+                 // Simple spacing check: don't spawn if one was just spawned
+                 if (obstacles.length === 0 || obstacles[obstacles.length-1].position.z > -60) {
+                     createObstacle();
+                 }
+            }
+
+            // Move & Collide
+            const playerBox = new THREE.Box3().setFromObject(player);
+            // Shrink hitbox for leniency
+            playerBox.expandByScalar(-0.3);
+
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                let ob = obstacles[i];
+                ob.position.z += state.speed * 40 * dt; // Match road speed
+
+                // Collision
+                const obBox = new THREE.Box3().setFromObject(ob);
+                if (playerBox.intersectsBox(obBox)) {
+                    gameOver();
+                }
+
+                // Cleanup
+                if (ob.position.z > 5) {
+                    scene.remove(ob);
+                    obstacles.splice(i, 1);
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const dt = clock.getDelta();
+            update(dt);
+            
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Boot
+        init();
+
+    </script>
+</body>
+</html>
